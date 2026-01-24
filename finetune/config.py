@@ -1,8 +1,8 @@
 import os
 
 # Configuration for the data
-DATA_TRAIN_INDEX_PATH = "../data/AUGMENTED_train.jsonl" 
-DATA_EVAL_INDEX_PATH  = "../data/AUGMENTED_eval.jsonl"
+DATA_TRAIN_INDEX_PATH = "./AUGMENTED_train.jsonl" 
+DATA_EVAL_INDEX_PATH  = "./AUGMENTED_eval.jsonl"
 
 # Configuration for the model
 PATCH_STREAM = True                                             # Stream training / inference
@@ -36,4 +36,5 @@ NAME =  EXP_TAG + \
 WEIGHTS_PATH = "weights_notagen_" + NAME + ".pth"                  # Path to save weights
 LOGS_PATH    = "logs_notagen_"    + NAME + ".txt"                     # Path to save logs
 WANDB_NAME = NAME
+
 
