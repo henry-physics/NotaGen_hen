@@ -1,3 +1,4 @@
+from pathlib import Path
 import os
 import time
 import datetime
@@ -35,6 +36,10 @@ byte_config = GPT2Config(num_hidden_layers=CHAR_NUM_LAYERS,
 
 model = NotaGenLMHeadModel(encoder_config=patch_config, decoder_config=byte_config).to(device)
 
+def load_seed_prompt(seed_path="seed.abc"):
+    with open(seed_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    return [line if line.endswith('\n') else line + '\n' for line in lines]
 
 def prepare_model_for_kbit_training(model, use_gradient_checkpointing=True):
     """
@@ -185,12 +190,10 @@ def rest_unreduce(abc_lines):
     return unreduced_lines
 
 
-def inference_patch(period, composer, instrumentation):
-
-    prompt_lines=[
-    '%' + period + '\n',
-    '%' + composer + '\n',
-    '%' + instrumentation + '\n']
+def inference_patch(seed_path="seed.abc"):
+    prompt_lines = load_seed_prompt(seed_path)
+    if not prompt_lines:
+        raise ValueError(f"Seed file {seed_path} is empty.")
 
     while True:
 
@@ -311,49 +314,28 @@ def inference_patch(period, composer, instrumentation):
                     return unreduced_abc_text
 
 
-        
-
-
 if __name__ == '__main__':
+    seed_files = ["seed.abc"]  # add more paths if needed
 
-    # Define your list of input tuples: (period, composer, instrumentation)
-    input_list = [
-        ('Romantic', 'Tchaikovsky, Pyotr', 'Keyboard'),
-        ('Modern', 'Ragtime', 'Piano'),
-      
-        
-    ]
-
-    # Base folder where all generated outputs will be saved
-    base_output_folder = '/workspace/generated_abc'
+    base_output_folder = '/workspace/NotaGen/gradio/RESTART_OUTPUT'
     os.makedirs(base_output_folder, exist_ok=True)
 
-    # List to store each run's result
     results = []
 
-    for i in range(5):
-	
-        for period, composer, instrumentation in input_list:
-            # Run the inference_patch function with the given inputs
-            generated_abc_text = inference_patch(period, composer, instrumentation)
-            
-            # Create a safe folder name based on input values.
-            # Here we remove commas and spaces are replaced with underscores.
-            folder_name = f"{period}_{composer.replace(',', '').replace(' ', '_')}_{instrumentation}"
-            output_folder = os.path.join(base_output_folder, folder_name)
+    for run_idx in range(10):
+        for seed_path in seed_files:
+            generated_abc_text = inference_patch(seed_path=seed_path)
+
+            seed_stem = Path(seed_path).stem
+            output_folder = os.path.join(base_output_folder, seed_stem)
             os.makedirs(output_folder, exist_ok=True)
-            
-            # Create a unique filename using a timestamp
+
             timestamp_str = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
             output_filename = f"generated_{timestamp_str}.abc"
             output_path = os.path.join(output_folder, output_filename)
-            
-            # Write the generated ABC text to the file
+
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(generated_abc_text)
-            
-            print(f"Saved generated ABC for input ({period}, {composer}, {instrumentation}) to: {output_path}")
-            
-            # Append the input and output path to results
-            results.append(((period, composer, instrumentation), output_path))
 
+            print(f"Saved generated ABC for seed {seed_path} to: {output_path}")
+            results.append((seed_path, output_path)) 
