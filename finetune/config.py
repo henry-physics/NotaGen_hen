@@ -1,8 +1,8 @@
 import os
 
 # Configuration for the data
-DATA_TRAIN_INDEX_PATH = "" 
-DATA_EVAL_INDEX_PATH  = ""
+DATA_TRAIN_INDEX_PATH = "../data/AUGMENTED_train.jsonl" 
+DATA_EVAL_INDEX_PATH  = "../data/AUGMENTED_eval.jsonl"
 
 # Configuration for the model
 PATCH_STREAM = True                                             # Stream training / inference
@@ -14,7 +14,7 @@ HIDDEN_SIZE = 1280                                               # Hidden Size
 
 # Configuration for the training
 BATCH_SIZE = 1         
-LEARNING_RATE = 1e-5   
+LEARNING_RATE = 1e-6   
 NUM_EPOCHS = 64                                                 # Number of epochs to train for (if early stopping doesn't intervene)
 ACCUMULATION_STEPS = 1                                          # Accumulation steps to simulate large batch size
 PATCH_SAMPLING_BATCH_SIZE = 0                                   # Batch size for patch during training, 0 for full conaudio
@@ -22,8 +22,8 @@ LOAD_FROM_CHECKPOINT = False                                    # Whether to loa
 WANDB_LOGGING = False                                           # Whether to log to wandb
 WANDB_KEY = '<your_wandb_key>'
 
-PRETRAINED_PATH = ""                # Path of pretrained weights
-EXP_TAG = ''                                            # Experiment tag for name differentiation
+PRETRAINED_PATH = "../../pretrain_weights.pth"                # Path of pretrained weights
+EXP_TAG = 'MODEL_NAME'                                            # Experiment tag for name differentiation
 NAME =  EXP_TAG + \
         "_p_size_" + str(PATCH_SIZE) + \
         "_p_length_" + str(PATCH_LENGTH) + \
@@ -36,3 +36,4 @@ NAME =  EXP_TAG + \
 WEIGHTS_PATH = "weights_notagen_" + NAME + ".pth"                  # Path to save weights
 LOGS_PATH    = "logs_notagen_"    + NAME + ".txt"                     # Path to save logs
 WANDB_NAME = NAME
+
