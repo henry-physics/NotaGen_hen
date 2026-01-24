@@ -3,10 +3,8 @@ import random
 import bisect
 import json
 import re
-import numpy as np
 from config import *
 from transformers import GPT2Model, GPT2LMHeadModel, LlamaModel, LlamaForCausalLM, PreTrainedModel
-from samplings import top_p_sampling, top_k_sampling, temperature_sampling
 from tokenizers import Tokenizer
 
 
@@ -38,7 +36,7 @@ class Patchilizer:
                     else:
                         new_line_bars = [line_bars[0]] + [line_bars[i] + line_bars[i + 1] for i in range(1, len(line_bars), 2)]
                     if 'V' not in new_line_bars[-1]:
-                        new_line_bars[-2] += new_line_bars[-1]  
+                        new_line_bars[-2] += new_line_bars[-1]  # 吸收最后一个 小节线+\n 的组合
                         new_line_bars = new_line_bars[:-1]
                 new_bars += new_line_bars
         except:
@@ -49,7 +47,7 @@ class Patchilizer:
     def split_patches(self, abc_text, patch_size=PATCH_SIZE, generate_last=False):
         if not generate_last and len(abc_text) % patch_size != 0:
             abc_text += chr(self.eos_token_id)
-        patches = [abc_text[i : i + patch_size] for i in range(0, len(abc_text), patch_size)]
+        patches = [abc_text[i: i + patch_size] for i in range(0, len(abc_text), patch_size)]
         return patches
 
     def patch2chars(self, patch):
@@ -64,7 +62,6 @@ class Patchilizer:
                 pass
             bytes += chr(idx)
         return bytes
-        
 
     def patchilize_metadata(self, metadata_lines):
 
@@ -73,7 +70,7 @@ class Patchilizer:
             metadata_patches += self.split_patches(line)
 
         return metadata_patches
-    
+
     def patchilize_tunebody(self, tunebody_lines, encode_mode='train'):
 
         tunebody_patches = []
@@ -85,7 +82,7 @@ class Patchilizer:
             for bar in bars[:-1]:
                 tunebody_patches += self.split_patches(bar)
             tunebody_patches += self.split_patches(bars[-1], generate_last=True)
-       
+
         return tunebody_patches
 
     def encode_train(self, abc_text, patch_length=PATCH_LENGTH, patch_size=PATCH_SIZE, add_special_patches=True, cut=True):
@@ -100,12 +97,12 @@ class Patchilizer:
                 tunebody_index = i
                 break
 
-        metadata_lines = lines[ : tunebody_index]
-        tunebody_lines = lines[tunebody_index : ]
+        metadata_lines = lines[: tunebody_index]
+        tunebody_lines = lines[tunebody_index:]
 
         if self.stream:
             tunebody_lines = ['[r:' + str(line_index) + '/' + str(len(tunebody_lines) - line_index - 1) + ']' + line for line_index, line in
-                                enumerate(tunebody_lines)]    
+                              enumerate(tunebody_lines)]
 
         metadata_patches = self.patchilize_metadata(metadata_lines)
         tunebody_patches = self.patchilize_tunebody(tunebody_lines, encode_mode='train')
@@ -120,9 +117,9 @@ class Patchilizer:
         if self.stream:
             if len(metadata_patches) + len(tunebody_patches) > patch_length:
                 available_cut_indexes = [0] + [index + 1 for index, patch in enumerate(tunebody_patches) if '\n' in patch]
-                line_index_for_cut_index = list(range(len(available_cut_indexes)))  
+                line_index_for_cut_index = list(range(len(available_cut_indexes)))
                 end_index = len(metadata_patches) + len(tunebody_patches) - patch_length
-                biggest_index = bisect.bisect_left(available_cut_indexes, end_index) 
+                biggest_index = bisect.bisect_left(available_cut_indexes, end_index)
                 available_cut_indexes = available_cut_indexes[:biggest_index + 1]
 
                 if len(available_cut_indexes) == 1:
@@ -140,9 +137,9 @@ class Patchilizer:
                     else:
                         cut_index = random.choice(range(1, len(available_cut_indexes) - 1))
 
-                    line_index = line_index_for_cut_index[cut_index] 
-                    stream_tunebody_lines = tunebody_lines[line_index : ]
-                    
+                    line_index = line_index_for_cut_index[cut_index]
+                    stream_tunebody_lines = tunebody_lines[line_index:]
+
                     stream_tunebody_patches = self.patchilize_tunebody(stream_tunebody_lines, encode_mode='train')
                     if add_special_patches:
                         stream_tunebody_patches = stream_tunebody_patches + [eos_patch]
@@ -152,9 +149,9 @@ class Patchilizer:
         else:
             patches = metadata_patches + tunebody_patches
 
-        if cut: 
-            patches = patches[ : patch_length]
-        else:  
+        if cut:
+            patches = patches[: patch_length]
+        else:
             pass
 
         # encode to ids
@@ -169,35 +166,35 @@ class Patchilizer:
 
         lines = abc_code.split('\n')
         lines = list(filter(None, lines))
-    
+
         tunebody_index = None
         for i, line in enumerate(lines):
             if line.startswith('[V:') or line.startswith('[r:'):
                 tunebody_index = i
                 break
-    
-        metadata_lines = lines[ : tunebody_index]
-        tunebody_lines = lines[tunebody_index : ]   
-    
+
+        metadata_lines = lines[: tunebody_index]
+        tunebody_lines = lines[tunebody_index:]
+
         metadata_lines = [line + '\n' for line in metadata_lines]
         if self.stream:
-            if not abc_code.endswith('\n'): 
+            if not abc_code.endswith('\n'):
                 tunebody_lines = [tunebody_lines[i] + '\n' for i in range(len(tunebody_lines) - 1)] + [tunebody_lines[-1]]
             else:
                 tunebody_lines = [tunebody_lines[i] + '\n' for i in range(len(tunebody_lines))]
         else:
             tunebody_lines = [line + '\n' for line in tunebody_lines]
-    
+
         metadata_patches = self.patchilize_metadata(metadata_lines)
         tunebody_patches = self.patchilize_tunebody(tunebody_lines, encode_mode='generate')
-    
+
         if add_special_patches:
             bos_patch = chr(self.bos_token_id) * (patch_size - 1) + chr(self.eos_token_id)
 
             metadata_patches = [bos_patch] + metadata_patches
-    
+
         patches = metadata_patches + tunebody_patches
-        patches = patches[ : patch_length]
+        patches = patches[: patch_length]
 
         # encode to ids
         id_patches = []
@@ -207,7 +204,7 @@ class Patchilizer:
             else:
                 id_patch = [ord(c) for c in patch] + [self.special_token_id] * (patch_size - len(patch))
             id_patches.append(id_patch)
-        
+
         return id_patches
 
     def decode(self, patches):
@@ -215,8 +212,6 @@ class Patchilizer:
         Decode patches into music.
         """
         return ''.join(self.patch2chars(patch) for patch in patches)
-
-        
 
 
 class PatchLevelDecoder(PreTrainedModel):
@@ -243,7 +238,7 @@ class PatchLevelDecoder(PreTrainedModel):
         patches = patches.reshape(len(patches), -1, PATCH_SIZE * (128))
         patches = self.patch_embedding(patches.to(self.device))
 
-        if masks==None:
+        if masks is None:
             return self.base(inputs_embeds=patches)
         else:
             return self.base(inputs_embeds=patches,
@@ -272,7 +267,7 @@ class CharLevelDecoder(PreTrainedModel):
         :return: the output of the model
         """
         # preparing the labels for model training
-        target_patches = torch.cat((torch.ones_like(target_patches[:,0:1])*self.bos_token_id, target_patches), dim=1)
+        target_patches = torch.cat((torch.ones_like(target_patches[:, 0:1]) * self.bos_token_id, target_patches), dim=1)
         # print('target_patches shape:', target_patches.shape)
 
         target_masks = target_patches == self.special_token_id
@@ -283,66 +278,53 @@ class CharLevelDecoder(PreTrainedModel):
         target_masks = target_masks.masked_fill_(labels == -100, 0)
 
         # select patches
-        if PATCH_SAMPLING_BATCH_SIZE!=0 and PATCH_SAMPLING_BATCH_SIZE<target_patches.shape[0]:
+        if PATCH_SAMPLING_BATCH_SIZE != 0 and PATCH_SAMPLING_BATCH_SIZE < target_patches.shape[0]:
             indices = list(range(len(target_patches)))
             random.shuffle(indices)
             selected_indices = sorted(indices[:PATCH_SAMPLING_BATCH_SIZE])
 
-            target_patches = target_patches[selected_indices,:]
-            target_masks = target_masks[selected_indices,:]
-            encoded_patches = encoded_patches[selected_indices,:]
+            target_patches = target_patches[selected_indices, :]
+            target_masks = target_masks[selected_indices, :]
+            encoded_patches = encoded_patches[selected_indices, :]
 
         # get input embeddings
         inputs_embeds = torch.nn.functional.embedding(target_patches, self.base.transformer.wte.weight)
 
         # concatenate the encoded patches with the input embeddings
-        inputs_embeds = torch.cat((encoded_patches.unsqueeze(1), inputs_embeds[:,1:,:]), dim=1)
+        inputs_embeds = torch.cat((encoded_patches.unsqueeze(1), inputs_embeds[:, 1:, :]), dim=1)
 
-        output = self.base(inputs_embeds=inputs_embeds, 
-                         attention_mask=target_masks,
-                         labels=labels)
-                         # output_hidden_states=True=True)
+        output = self.base(inputs_embeds=inputs_embeds,
+                           attention_mask=target_masks,
+                           labels=labels)
+        # output_hidden_states=True=True)
 
         return output
 
     def generate(self,
                  encoded_patch: torch.Tensor,   # [hidden_size]
-                 tokens: torch.Tensor): # [1]
+                 tokens: torch.Tensor):  # [1]
         """
         The generate function for generating a patch based on the encoded patch and already generated tokens.
         :param encoded_patch: the encoded patch
         :param tokens: already generated tokens in the patch
-        :return: the probability distribution of next token
+        :return: the logits of next token
         """
-        encoded_patch = encoded_patch.reshape(1, 1, -1) # [1, 1, hidden_size]
+        encoded_patch = encoded_patch.reshape(1, 1, -1)  # [1, 1, hidden_size]
         tokens = tokens.reshape(1, -1)
 
         # Get input embeddings
         tokens = torch.nn.functional.embedding(tokens, self.base.transformer.wte.weight)
 
         # Concatenate the encoded patch with the input embeddings
-        tokens = torch.cat((encoded_patch, tokens[:,1:,:]), dim=1)
-        
+        tokens = torch.cat((encoded_patch, tokens[:, 1:, :]), dim=1)
+
         # Get output from model
         outputs = self.base(inputs_embeds=tokens)
-        
-        # Get probabilities of next token
-        probs = torch.nn.functional.softmax(outputs.logits.squeeze(0)[-1], dim=-1)
 
-        return probs
+        logits = outputs.logits.squeeze(0)[-1]
 
-def safe_normalize_probs(probs):
-    epsilon = 1e-12
-    probs = np.array(probs, dtype=np.float64)
-    probs = np.where(np.isnan(probs) | (probs < 0), 0, probs)
-    probs = probs + epsilon
-    s = probs.sum()
-    if s > 0:
-        probs = probs / s
-    else:
-        probs = np.zeros_like(probs)
-        probs[0] = 1.0
-    return probs
+        return logits
+
 
 class NotaGenLMHeadModel(PreTrainedModel):
     """
@@ -371,15 +353,45 @@ class NotaGenLMHeadModel(PreTrainedModel):
         """
         patches = patches.reshape(len(patches), -1, PATCH_SIZE)
         encoded_patches = self.patch_level_decoder(patches, masks)["last_hidden_state"]
-        
+
         left_shift_masks = masks * (masks.flip(1).cumsum(1).flip(1) > 1)
         masks[:, 0] = 0
-        
+
         encoded_patches = encoded_patches[left_shift_masks == 1]
-        patches = patches[masks == 1]        
+        patches = patches[masks == 1]
 
         return self.char_level_decoder(encoded_patches, patches)
-        
+
+    def _apply_sampling_filters(self, logits, top_k=0, top_p=1.0):
+        filtered_logits = logits.clone()
+
+        if top_k is not None and top_k > 0 and top_k < filtered_logits.size(-1):
+            topk_values, _ = torch.topk(filtered_logits, top_k)
+            kth_value = topk_values[-1]
+            filtered_logits = torch.where(filtered_logits < kth_value,
+                                          torch.full_like(filtered_logits, float('-inf')),
+                                          filtered_logits)
+
+        if top_p is not None and 0.0 < top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(filtered_logits, descending=True)
+            sorted_probs = torch.softmax(sorted_logits, dim=-1)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+            sorted_mask = cumulative_probs > top_p
+            sorted_mask[..., 0] = False  # always keep at least one token
+
+            sorted_logits = torch.where(sorted_mask,
+                                        torch.full_like(sorted_logits, float('-inf')),
+                                        sorted_logits)
+
+            filtered_logits = torch.full_like(filtered_logits, float('-inf'))
+            filtered_logits.scatter_(0, sorted_indices, sorted_logits)
+
+        if torch.all(torch.isneginf(filtered_logits)):
+            filtered_logits = logits.clone()
+
+        return filtered_logits
+
     def generate(self,
                  patches: torch.Tensor,
                  top_k=0,
@@ -394,30 +406,41 @@ class NotaGenLMHeadModel(PreTrainedModel):
         :return: the generated patches
         """
         if patches.shape[-1] % PATCH_SIZE != 0:
-            tokens = patches[:,:,-(patches.shape[-1]%PATCH_SIZE):].squeeze(0, 1)
-            tokens = torch.cat((torch.tensor([self.bos_token_id], device=self.device), tokens), dim=-1)
-            patches = patches[:,:,:-(patches.shape[-1]%PATCH_SIZE)]
+            tokens = patches[:, :, -(patches.shape[-1] % PATCH_SIZE):].squeeze(0, 1).to(dtype=torch.long)
+            bos = torch.tensor([self.bos_token_id], device=self.device, dtype=torch.long)
+            tokens = torch.cat((bos, tokens), dim=-1)
+            patches = patches[:, :, :-(patches.shape[-1] % PATCH_SIZE)]
         else:
-            tokens =  torch.tensor([self.bos_token_id], device=self.device)
+            tokens = torch.tensor([self.bos_token_id], device=self.device, dtype=torch.long)
 
-        patches = patches.reshape(len(patches), -1, PATCH_SIZE) # [bs, seq, patch_size]
-        encoded_patches = self.patch_level_decoder(patches)["last_hidden_state"]    # [bs, seq, hidden_size]
-        generated_patch = []            
+        patches = patches.reshape(len(patches), -1, PATCH_SIZE)  # [bs, seq, patch_size]
+        encoded_patches = self.patch_level_decoder(patches)["last_hidden_state"]  # [bs, seq, hidden_size]
+        generated_patch = []
+
+        min_temperature = 1e-5
+        temperature = max(float(temperature), min_temperature)
 
         while True:
-            prob = self.char_level_decoder.generate(encoded_patches[0][-1], tokens).cpu().detach().numpy()  # [128]
-            prob = safe_normalize_probs(prob)
-            prob = top_k_sampling(prob, top_k=top_k, return_probs=True) # [128]
-            prob = safe_normalize_probs(prob)
-            prob = top_p_sampling(prob, top_p=top_p, return_probs=True) # [128]
-            prob = safe_normalize_probs(prob)
-            token = temperature_sampling(prob, temperature=temperature) # int
-            char = chr(token)
+            logits = self.char_level_decoder.generate(encoded_patches[0, -1], tokens)
+
+            if not torch.isfinite(logits).all():
+                logits = torch.zeros_like(logits)
+
+            logits = logits / temperature
+            logits = self._apply_sampling_filters(logits, top_k=top_k, top_p=top_p)
+
+            probs = torch.softmax(logits, dim=-1)
+            if not torch.isfinite(probs).all() or probs.sum() <= 0:
+                probs = torch.ones_like(probs) / probs.numel()
+            else:
+                probs = probs / probs.sum()
+
+            token = torch.multinomial(probs, num_samples=1).item()
             generated_patch.append(token)
 
-            if len(tokens) >= PATCH_SIZE:# or token == self.eos_token_id:
+            if len(tokens) >= PATCH_SIZE:
                 break
             else:
-                tokens = torch.cat((tokens, torch.tensor([token], device=self.device)), dim=0)
-        
+                tokens = torch.cat((tokens, torch.tensor([token], device=self.device, dtype=torch.long)), dim=0)
+
         return generated_patch
