@@ -162,7 +162,7 @@ class NotaGenDataset(Dataset):
             des_key = Index2Key[des_key_index]
 
         # 2. Define your absolute base directory for AUGMENTED data.
-        base_data_dir = "/content/NotaGen/data/AUGMENTED"
+        base_data_dir = "../data/AUGMENTED"
 
         # 3. Extract the original file name from the filepath.
         original_name = os.path.basename(filepath)  # could be "AUGMENTED\\32_Eb" or "32.abc"
@@ -400,3 +400,4 @@ if __name__ == "__main__":
     if global_rank == 0:
         print("Best Eval Epoch : " + str(best_epoch))
         print("Min Eval Loss : " + str(min_eval_loss))
+
