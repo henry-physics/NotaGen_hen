@@ -1,10 +1,10 @@
-
 import os
 import time
+import datetime
 import torch
 from utils import *
 from config import *
-from transformers import GPT2Config, LlamaConfig
+from transformers import GPT2Config
 from abctoolkit.utils import Exclaim_re, Quote_re, SquareBracket_re, Barline_regexPattern
 from abctoolkit.transpose import Note_list, Pitch_sign_list
 from abctoolkit.duration import calculate_bartext_duration
@@ -13,11 +13,10 @@ Note_list = Note_list + ['z', 'x']
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
 else:
     device = torch.device("cpu")
-
-os.makedirs(ORIGINAL_OUTPUT_FOLDER, exist_ok=True)
-os.makedirs(INTERLEAVED_OUTPUT_FOLDER, exist_ok=True)
 
 patchilizer = Patchilizer()
 
@@ -34,7 +33,36 @@ byte_config = GPT2Config(num_hidden_layers=CHAR_NUM_LAYERS,
                          num_attention_heads=HIDDEN_SIZE // 64,
                          vocab_size=128)
 
-model = NotaGenLMHeadModel(encoder_config=patch_config, decoder_config=byte_config)
+model = NotaGenLMHeadModel(encoder_config=patch_config, decoder_config=byte_config).to(device)
+
+
+def prepare_model_for_kbit_training(model, use_gradient_checkpointing=True):
+    """
+    Prepare model for k-bit training.
+    Features include:
+    1. Convert model to mixed precision (FP16).
+    2. Disable unnecessary gradient computations.
+    3. Enable gradient checkpointing (optional).
+    """
+    # Convert model to mixed precision
+    model = model.to(dtype=torch.float16)
+
+    # Disable gradients for embedding layers
+    for param in model.parameters():
+        if param.dtype == torch.float32:
+            param.requires_grad = False
+
+    # Enable gradient checkpointing
+    if use_gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+
+    return model
+
+
+model = prepare_model_for_kbit_training(
+    model,
+    use_gradient_checkpointing=False  
+)
 
 print("Parameter Number: " + str(sum(p.numel() for p in model.parameters() if p.requires_grad)))
 
@@ -44,10 +72,33 @@ model = model.to(device)
 model.eval()
 
 
+def complete_brackets(s):
+    stack = []
+    bracket_map = {'{': '}', '[': ']', '(': ')'}
+    
+    # Iterate through each character, handle bracket matching
+    for char in s:
+        if char in bracket_map:
+            stack.append(char)
+        elif char in bracket_map.values():
+            # Find the corresponding left bracket
+            for key, value in bracket_map.items():
+                if value == char:
+                    if stack and stack[-1] == key:
+                        stack.pop()
+                    break  # Found matching right bracket, process next character
+    
+    # Complete missing right brackets (in reverse order of remaining left brackets in stack)
+    completion = ''.join(bracket_map[c] for c in reversed(stack))
+    return s + completion
+
+
 def rest_unreduce(abc_lines):
 
     tunebody_index = None
     for i in range(len(abc_lines)):
+        if abc_lines[i].startswith('%%score'):
+            abc_lines[i] = complete_brackets(abc_lines[i])
         if '[V:' in abc_lines[i]:
             tunebody_index = i
             break
@@ -134,19 +185,26 @@ def rest_unreduce(abc_lines):
     return unreduced_lines
 
 
-def inference_patch(prompt_lines=[], pieces=NUM_SAMPLES):
+def inference_patch(period, composer, instrumentation):
 
-    file_no = 1
+    prompt_lines=[
+    '%' + period + '\n',
+    '%' + composer + '\n',
+    '%' + instrumentation + '\n']
 
-    bos_patch = [patchilizer.bos_token_id] * (PATCH_SIZE - 1) + [patchilizer.eos_token_id]
+    while True:
 
-    while file_no <= pieces:
+        failure_flag = False
+
+        bos_patch = [patchilizer.bos_token_id] * (PATCH_SIZE - 1) + [patchilizer.eos_token_id]
 
         start_time = time.time()
-        start_time_format = time.strftime("%Y%m%d-%H%M%S")
 
         prompt_patches = patchilizer.patchilize_metadata(prompt_lines)
         byte_list = list(''.join(prompt_lines))
+        context_tunebody_byte_list = []
+        metadata_byte_list = []
+
         print(''.join(byte_list), end='')
 
         prompt_patches = [[ord(c) for c in patch] + [patchilizer.special_token_id] * (PATCH_SIZE - len(patch)) for patch
@@ -155,117 +213,146 @@ def inference_patch(prompt_lines=[], pieces=NUM_SAMPLES):
 
         input_patches = torch.tensor(prompt_patches, device=device).reshape(1, -1)
 
-        failure_flag = False
         end_flag = False
         cut_index = None
 
         tunebody_flag = False
-        while True:
-            predicted_patch = model.generate(input_patches.unsqueeze(0),
-                                             top_k=TOP_K,
-                                             top_p=TOP_P,
-                                             temperature=TEMPERATURE)
-            if not tunebody_flag and patchilizer.decode([predicted_patch]).startswith('[r:'):  # start with [r:0/
-                tunebody_flag = True
-                r0_patch = torch.tensor([ord(c) for c in '[r:0/']).unsqueeze(0).to(device)
-                temp_input_patches = torch.concat([input_patches, r0_patch], axis=-1)
-                predicted_patch = model.generate(temp_input_patches.unsqueeze(0),
-                                                 top_k=TOP_K,
-                                                 top_p=TOP_P,
-                                                 temperature=TEMPERATURE)
-                predicted_patch = [ord(c) for c in '[r:0/'] + predicted_patch
-            if predicted_patch[0] == patchilizer.bos_token_id and predicted_patch[1] == patchilizer.eos_token_id:
-                end_flag = True
-                break
-            next_patch = patchilizer.decode([predicted_patch])
 
-            for char in next_patch:
-                byte_list.append(char)
-                print(char, end='')
+        with torch.inference_mode():
+            
+            while True:
+                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    predicted_patch = model.generate(input_patches.unsqueeze(0),
+                                                    top_k=TOP_K,
+                                                    top_p=TOP_P,
+                                                    temperature=TEMPERATURE)
+                if not tunebody_flag and patchilizer.decode([predicted_patch]).startswith('[r:'):  # 初次进入tunebody，必须以[r:0/开头
+                    tunebody_flag = True
+                    r0_patch = torch.tensor([ord(c) for c in '[r:0/']).unsqueeze(0).to(device)
+                    temp_input_patches = torch.concat([input_patches, r0_patch], axis=-1)
+                    predicted_patch = model.generate(temp_input_patches.unsqueeze(0),
+                                                    top_k=TOP_K,
+                                                    top_p=TOP_P,
+                                                    temperature=TEMPERATURE)
+                    predicted_patch = [ord(c) for c in '[r:0/'] + predicted_patch
+                if predicted_patch[0] == patchilizer.bos_token_id and predicted_patch[1] == patchilizer.eos_token_id:
+                    end_flag = True
+                    break
+                next_patch = patchilizer.decode([predicted_patch])
 
-            patch_end_flag = False
-            for j in range(len(predicted_patch)):
-                if patch_end_flag:
-                    predicted_patch[j] = patchilizer.special_token_id
-                if predicted_patch[j] == patchilizer.eos_token_id:
-                    patch_end_flag = True
+                for char in next_patch:
+                    byte_list.append(char)
+                    if tunebody_flag:
+                        context_tunebody_byte_list.append(char)
+                    else:
+                        metadata_byte_list.append(char)
+                    print(char, end='')
 
-            predicted_patch = torch.tensor([predicted_patch], device=device)  # (1, 16)
-            input_patches = torch.cat([input_patches, predicted_patch], dim=1)  # (1, 16 * patch_len)
+                patch_end_flag = False
+                for j in range(len(predicted_patch)):
+                    if patch_end_flag:
+                        predicted_patch[j] = patchilizer.special_token_id
+                    if predicted_patch[j] == patchilizer.eos_token_id:
+                        patch_end_flag = True
 
-            if len(byte_list) > 102400:  
-                failure_flag = True
-                break
-            if time.time() - start_time > 20 * 60:  
-                failure_flag = True
-                break
+                predicted_patch = torch.tensor([predicted_patch], device=device)  # (1, 16)
+                input_patches = torch.cat([input_patches, predicted_patch], dim=1)  # (1, 16 * patch_len)
 
-            if input_patches.shape[1] >= PATCH_LENGTH * PATCH_SIZE and not end_flag:
-                print('Stream generating...')
-                abc_code = ''.join(byte_list)
-                abc_lines = abc_code.split('\n')
-
-                tunebody_index = None
-                for i, line in enumerate(abc_lines):
-                    if line.startswith('[r:') or line.startswith('[V:'):
-                        tunebody_index = i
-                        break
-                if tunebody_index is None or tunebody_index == len(abc_lines) - 1:
+                if len(byte_list) > 102400:
+                    failure_flag = True
+                    break
+                if time.time() - start_time > 10 * 60: 
+                    failure_flag = True
                     break
 
-                metadata_lines = abc_lines[:tunebody_index]
-                tunebody_lines = abc_lines[tunebody_index:]
+                if input_patches.shape[1] >= PATCH_LENGTH * PATCH_SIZE and not end_flag:
+                    print('Stream generating...')
 
-                metadata_lines = [line + '\n' for line in metadata_lines]
-                if not abc_code.endswith('\n'):  
-                    tunebody_lines = [tunebody_lines[i] + '\n' for i in range(len(tunebody_lines) - 1)] + [
-                        tunebody_lines[-1]]
+                    metadata = ''.join(metadata_byte_list)
+                    context_tunebody = ''.join(context_tunebody_byte_list)
+
+                    if '\n' not in context_tunebody:
+                        break   # Generated content is all metadata, abandon
+
+                    context_tunebody_liness = context_tunebody.split('\n')
+                    if not context_tunebody.endswith('\n'):
+                        context_tunebody_liness = [context_tunebody_liness[i] + '\n' for i in range(len(context_tunebody_liness) - 1)] + [context_tunebody_liness[-1]]
+                    else:
+                        context_tunebody_liness = [context_tunebody_liness[i] + '\n' for i in range(len(context_tunebody_liness))]
+
+                    cut_index = len(context_tunebody_liness) // 2
+
+                    abc_code_slice = metadata + ''.join(context_tunebody_liness[-cut_index:])
+
+                    input_patches = patchilizer.encode_generate(abc_code_slice)
+
+                    input_patches = [item for sublist in input_patches for item in sublist]
+                    input_patches = torch.tensor([input_patches], device=device)
+                    input_patches = input_patches.reshape(1, -1)
+
+                    context_tunebody_byte_list = list(''.join(context_tunebody_liness[-cut_index:]))
+
+            if not failure_flag:
+                abc_text = ''.join(byte_list)
+
+                # unreduce
+                abc_lines = abc_text.split('\n')
+                abc_lines = list(filter(None, abc_lines))
+                abc_lines = [line + '\n' for line in abc_lines]
+                try:
+                    unreduced_abc_lines = rest_unreduce(abc_lines)
+                except:
+                    failure_flag = True
+                    pass
                 else:
-                    tunebody_lines = [tunebody_lines[i] + '\n' for i in range(len(tunebody_lines))]
+                    unreduced_abc_lines = [line for line in unreduced_abc_lines if not(line.startswith('%') and not line.startswith('%%'))]
+                    unreduced_abc_lines = ['X:1\n'] + unreduced_abc_lines
+                    unreduced_abc_text = ''.join(unreduced_abc_lines)
+                    return unreduced_abc_text
 
-                if cut_index is None:
-                    cut_index = len(tunebody_lines) // 2
 
-                abc_code_slice = ''.join(metadata_lines + tunebody_lines[-cut_index:])
-                input_patches = patchilizer.encode_generate(abc_code_slice)
-
-                input_patches = [item for sublist in input_patches for item in sublist]
-                input_patches = torch.tensor([input_patches], device=device)
-                input_patches = input_patches.reshape(1, -1)
-
-        if not failure_flag:
-            generation_time_cost = time.time() - start_time
-
-            abc_text = ''.join(byte_list)
-            filename = time.strftime("%Y%m%d-%H%M%S") + \
-                    "_" + format(generation_time_cost, '.2f') + '_' + str(file_no) + ".abc"
-                    
-            # unreduce
-            unreduced_output_path = os.path.join(INTERLEAVED_OUTPUT_FOLDER, filename)
-            
-            abc_lines = abc_text.split('\n')
-            abc_lines = list(filter(None, abc_lines))
-            abc_lines = [line + '\n' for line in abc_lines]
-            try:
-                abc_lines = rest_unreduce(abc_lines)
-
-                with open(unreduced_output_path, 'w') as file:
-                    file.writelines(abc_lines)
-            except:
-                pass
-            else:
-                # original
-                original_output_path = os.path.join(ORIGINAL_OUTPUT_FOLDER, filename)
-                with open(original_output_path, 'w') as w:
-                    w.write(abc_text)
-
-                file_no += 1
-
-        else:
-            print('failed')
-
+        
 
 
 if __name__ == '__main__':
 
-    inference_patch()
+    # Define your list of input tuples: (period, composer, instrumentation)
+    input_list = [
+        ('Romantic', 'Tchaikovsky, Pyotr', 'Keyboard'),
+        ('Modern', 'Ragtime', 'Piano'),
+      
+        
+    ]
+
+    # Base folder where all generated outputs will be saved
+    base_output_folder = '/workspace/generated_abc'
+    os.makedirs(base_output_folder, exist_ok=True)
+
+    # List to store each run's result
+    results = []
+
+    for i in range(5):
+	
+        for period, composer, instrumentation in input_list:
+            # Run the inference_patch function with the given inputs
+            generated_abc_text = inference_patch(period, composer, instrumentation)
+            
+            # Create a safe folder name based on input values.
+            # Here we remove commas and spaces are replaced with underscores.
+            folder_name = f"{period}_{composer.replace(',', '').replace(' ', '_')}_{instrumentation}"
+            output_folder = os.path.join(base_output_folder, folder_name)
+            os.makedirs(output_folder, exist_ok=True)
+            
+            # Create a unique filename using a timestamp
+            timestamp_str = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            output_filename = f"generated_{timestamp_str}.abc"
+            output_path = os.path.join(output_folder, output_filename)
+            
+            # Write the generated ABC text to the file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(generated_abc_text)
+            
+            print(f"Saved generated ABC for input ({period}, {composer}, {instrumentation}) to: {output_path}")
+            
+            # Append the input and output path to results
+            results.append(((period, composer, instrumentation), output_path))
